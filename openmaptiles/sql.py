@@ -282,6 +282,30 @@ FROM (SELECT osm_id                       AS id,
       ) AS feature;
 $$ LANGUAGE SQL IMMUTABLE;
 
+CREATE OR REPLACE FUNCTION get_public_indoor(query_id integer)
+    RETURNS JSON AS
+$$
+SELECT ST_AsGeoJSON(feature.*)::json
+FROM (SELECT osm_id                       AS id,
+             ST_Transform(geometry, 4326) AS geometry,
+             ToPoint(ST_Transform(geometry, 4326)) as point,
+             NULLIF(name, '')             AS name,
+             tags
+      FROM osm_indoor_polygon
+      WHERE osm_id = query_id AND (access = 'yes' OR is_poi(tags))
+
+      UNION ALL
+
+      SELECT osm_id                       AS id,
+             ST_Transform(geometry, 4326) AS geometry,
+             ToPoint(ST_Transform(geometry, 4326)) as point,
+             NULLIF(name, '')             AS name,
+             tags
+      FROM osm_poi_point
+      WHERE osm_id = query_id
+      ) AS feature;
+$$ LANGUAGE SQL IMMUTABLE;
+
 DO
 $$
     BEGIN
@@ -289,47 +313,76 @@ $$
                        FROM pg_roles
                        WHERE rolname = 'web_anon') THEN
             CREATE ROLE web_anon nologin;
-            GRANT USAGE ON SCHEMA public TO web_anon;
-            GRANT SELECT ON osm_indoor_polygon, osm_poi_point, osm_area_point, 
-                osm_transportation_linestring, osm_poi_polygon, osm_area_heatpoint, osm_building_polygon, 
-                osm_building_area_point, osm_indoor_linestring TO web_anon;
+
         END IF;
     END
 $$;
 
-DROP FUNCTION IF EXISTS getmvt(zoom integer, x integer, y integer);
-CREATE FUNCTION getmvt(zoom integer, x integer, y integer)
-    RETURNS TABLE(mvt bytea, key text) AS $$
-BEGIN
-    RETURN QUERY SELECT
-                     decode('00', 'hex')::bytea AS mvt,
-                     '0' AS key;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE DOMAIN "application/x-protobuf" AS bytea;
-
-CREATE OR REPLACE FUNCTION gettile(zoom INT, x INT, y INT) RETURNS "application/x-protobuf" AS
-$$
-DECLARE
-    headers      TEXT;
-    DECLARE blob bytea;
+create or replace function ping() returns text as $$
 begin
-    select '[{"Content-Type": "application/x-protobuf"}]'
-    into headers;
-    perform set_config('response.headers', headers, true);
-    select mvt from getmvt(zoom, x, y) into blob;
-    if FOUND -- special var, see https://www.postgresql.org/docs/current/plpgsql-statements.html#PLPGSQL-STATEMENTS-DIAGNOSTICS
-    then
-        return (blob);
-    else
-        raise sqlstate 'PT404' using
-            message = 'NOT FOUND',
-            detail = 'Tile not found',
-            hint = format('%s / %s / %s seems to be an invalid tile', zoom, x, y);
-    end if;
+    perform set_config('response.headers', '[{"Cache-Control": "no-cache"}]', true);
+    return 'OK';
 end
 $$ language plpgsql;
+
+GRANT USAGE ON SCHEMA public TO web_anon;
+GRANT SELECT ON osm_indoor_polygon, osm_poi_point, osm_area_point, 
+    osm_transportation_linestring, osm_poi_polygon, osm_area_heatpoint, osm_building_polygon, 
+    osm_building_area_point, osm_indoor_linestring TO web_anon;
+CREATE OR REPLACE FUNCTION get_public_mvt(zoom integer, x integer, y integer)
+    RETURNS TABLE (mvt bytea, key text) AS
+$$
+SELECT mvt, md5(mvt) AS key
+FROM (SELECT STRING_AGG(mvtl, '') AS mvt
+      FROM (     
+            SELECT COALESCE(ST_AsMVT(t, 'area', 4096, 'mvtgeometry'), '') as mvtl
+            FROM (SELECT ST_AsMVTGeom(geometry, ST_TileEnvelope(zoom, x, y), 4096, 64, true) AS mvtgeometry,
+                         class,
+                         subclass,
+                         is_poi,
+                         level,
+                         access
+                  FROM layer_indoor(ST_Expand(ST_TileEnvelope(zoom, x, y), 626172.1357121641 / 2 ^ zoom), zoom)) AS t
+                  WHERE is_poi OR class~'area|wall'
+            UNION ALL
+            SELECT COALESCE(ST_AsMVT(t, 'transportation', 4096, 'mvtgeometry'), '') as mvtl
+            FROM (SELECT ST_AsMVTGeom(geometry, ST_TileEnvelope(zoom, x, y), 4096, 64, true) AS mvtgeometry,
+                         class,
+                         conveying,
+                         level
+                  FROM layer_transportation(ST_Expand(ST_TileEnvelope(zoom, x, y), 626172.1357121641 / 2 ^ zoom),
+                                            zoom)) AS t
+            UNION ALL
+            SELECT COALESCE(ST_AsMVT(t, 'poi', 4096, 'mvtgeometry', 'osm_id'), '') as mvtl
+            FROM (SELECT osm_id,
+                         id,
+                         ST_AsMVTGeom(geometry, ST_TileEnvelope(zoom, x, y), 4096, 1024, true) AS mvtgeometry,
+                         name,
+                         name_en,
+                         name_de,
+                         ref,
+                         class,
+                         subclass,
+                         agg_stop,
+                         layer,
+                         level,
+                         indoor,
+                         rank
+                  FROM layer_poi(ST_Expand(ST_TileEnvelope(zoom, x, y), 10018754.171394626 / 2 ^ zoom), zoom,
+                                 156543.03392804103 / 2 ^ zoom::NUMERIC)) AS t
+            UNION ALL
+            SELECT COALESCE(ST_AsMVT(t, 'building_area', 4096, 'mvtgeometry'), '') as mvtl
+            FROM (SELECT ST_AsMVTGeom(geometry, ST_TileEnvelope(zoom, x, y), 4096, 64, true) AS mvtgeometry, height
+                  FROM layer_building_area(ST_Expand(ST_TileEnvelope(zoom, x, y), 626172.1357121641 / 2 ^ zoom),
+                                           zoom)) AS t
+            UNION ALL
+            SELECT COALESCE(ST_AsMVT(t, 'building_area_name', 4096, 'mvtgeometry'), '') as mvtl
+            FROM (SELECT ST_AsMVTGeom(geometry, ST_TileEnvelope(zoom, x, y), 4096, 64, true) AS mvtgeometry, name
+                  FROM layer_building_area_name(ST_Expand(ST_TileEnvelope(zoom, x, y), 626172.1357121641 / 2 ^ zoom),
+                                                zoom)) AS t) AS all_layers) AS mvt_data
+    ;
+$$ LANGUAGE SQL STABLE
+RETURNS NULL ON NULL INPUT;
 """
 
 

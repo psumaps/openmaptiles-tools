@@ -29,35 +29,6 @@ RUN set -eux ;\
     # Older imposm executable was called imposm3 - rename it to the common name "imposm"
     ( [ -f imposm ] && mv imposm /build-bin/imposm || mv imposm3 /build-bin/imposm )
 
-
-# Build osmborder
-FROM python:3.9 as c-builder
-ARG OSMBORDER_REV=e3ae8f7a2dcdcd6dc80abab4679cb5edb7dc6fa5
-
-RUN set -eux ;\
-    mkdir /build-bin ;\
-    DEBIAN_FRONTEND=noninteractive apt-get update ;\
-    DEBIAN_FRONTEND=noninteractive apt-get install  -y --no-install-recommends \
-        `# installing osmborder dependencies` \
-        build-essential \
-        ca-certificates \
-        cmake \
-        git \
-        libosmium2-dev \
-        zlib1g-dev \
-        ;\
-    /bin/bash -c 'echo ""; echo ""; echo "##### Building osmborder -- https://github.com/pnorman/osmborder"' >&2 ;\
-    git clone https://github.com/pnorman/osmborder.git /usr/src/osmborder ;\
-    cd /usr/src/osmborder ;\
-    git checkout ${OSMBORDER_REV:?} ;\
-    mkdir -p /usr/src/osmborder/build ;\
-    cd /usr/src/osmborder/build ;\
-    cmake .. ;\
-    make ;\
-    make install ;\
-    mv /usr/src/osmborder/build/src/osmborder /build-bin ;\
-    mv /usr/src/osmborder/build/src/osmborder_filter /build-bin
-
 # Build SPREET
 FROM rust:1.76 as rust-builder
 ARG SPREET_REPO="https://github.com/flother/spreet"
@@ -148,16 +119,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy tools, imposm, osmborder and spreet into the app dir
 COPY --from=go-builder /build-bin/* ./
-COPY --from=c-builder /build-bin/* ./
 COPY --from=rust-builder /build-bin/* ./
 COPY . .
-
-RUN set -eux ;\
-    mv bin/* . ;\
-    rm -rf bin ;\
-    rm requirements.txt ;\
-    ./download-osm list geofabrik ;\
-    ./download-osm list bbbike
 
 WORKDIR /tileset
 

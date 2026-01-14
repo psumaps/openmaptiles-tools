@@ -1,4 +1,4 @@
-ARG BASE_POSTGIS_VER=16-3.4
+ARG BASE_POSTGIS_VER=16-3.5
 FROM postgis/postgis:$BASE_POSTGIS_VER
 
 LABEL maintainer="Yuri Astrakhan <YuriAstrakhan@gmail.com>"
@@ -21,12 +21,13 @@ ARG PGROUTING_REPO=https://github.com/pgRouting/pgrouting.git
 
 RUN set -eux  ;\
     apt-get -qq -y update  ;\
-    ##
-    ## Install build dependencies
+    ## Install build dependencies \
     apt-get -qq -y --no-install-recommends install \
         build-essential \
         cmake \
         ca-certificates \
+        clang-13 \
+        llvm-13 \
         # Required by Nominatim to download data files
         curl \
         git \
@@ -83,6 +84,7 @@ RUN set -eux  ;\
         automake \
         autotools-dev \
         build-essential \
+        clang-13 \
         ca-certificates \
         bison \
         cmake \
